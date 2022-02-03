@@ -23,6 +23,7 @@ Options:
     --release-upgrade, -r              (STAGE 3) Update 'qubes-release' for Qubes R4.1.
     --dist-upgrade, -s                 (STAGE 4) Upgrade to Qubes R4.1 and Fedora 32 repositories.
     --setup-efi-grub, -g               (STAGE 5) Setup EFI Grub.
+    --convert-luks, -c                 (STAGE 6) Convert LUKS header to LUKS2, requires disk passphrase
     --all, -a                          Execute all the above stages in one call.
 
     --assumeyes, -y                    Automatically answer yes for all questions.
@@ -395,6 +396,40 @@ setup_efi_grub() {
     fi
 }
 
+convert_luks_single() {
+    local luks_part="$1"
+    local cryptsetup_opt=
+    if [ "$assumeyes" = 1 ]; then
+        cryptsetup_opt=--batch-mode
+    fi
+    # shellcheck disable=SC2086
+    echo "----> Converting LUKS on $luks_part"
+    cryptsetup convert --type=luks2 $cryptsetup_opt "$luks_part"
+    cryptsetup luksConvertKey "$luks_part"
+}
+
+convert_luks() {
+    local luks_parts=()
+    while read -r name dev password options; do
+        if [[ "$name" = "#"* ]]; then
+            continue
+        fi
+        if [[ "$password" = "/dev/random" ]] || [[ "$password" = "/dev/urandom" ]]; then
+            continue
+        fi
+        case "$options" in
+            plain*|swap*|tmp*) continue;;
+        esac
+        if [[ "$dev" = "UUID="* ]]; then
+            dev=$(blkid --output device --match-token "$dev")
+        fi
+        luks_parts+=( "$dev" )
+    done < /etc/crypttab
+    for part in "${luks_parts[@]}"; do
+        convert_luks_single "$part"
+    done
+}
+
 get_thin_pool_name() {
     local root_dev root_pool
     root_dev=$(df --output=source / | tail -1)
@@ -473,7 +508,7 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-if ! OPTS=$(getopt -o htrlsgydu:n:f:jkp --long help,all,update,template-standalone-upgrade,release-upgrade,dist-upgrade,setup-efi-grub,assumeyes,double-metadata-size,usbvm:,netvm:,updatevm:,skip-template-upgrade,skip-standalone-upgrade,resync-appmenus-features,only-update:,max-concurrency:,keep-running: -n "$0" -- "$@"); then
+if ! OPTS=$(getopt -o htrlsgcydu:n:f:jkp --long help,all,update,template-standalone-upgrade,release-upgrade,dist-upgrade,setup-efi-grub,convert-luks,assumeyes,double-metadata-size,usbvm:,netvm:,updatevm:,skip-template-upgrade,skip-standalone-upgrade,resync-appmenus-features,only-update:,max-concurrency:,keep-running: -n "$0" -- "$@"); then
     echo "ERROR: Failed while parsing options."
     exit 1
 fi
@@ -494,6 +529,7 @@ while [[ $# -gt 0 ]]; do
             release_upgrade=1
             dist_upgrade=1
             update_grub=1
+            convert_luks=1
             ;;
         -d | --double-metadata-size ) double_metadata_size=1;;
         -t | --update ) update=1;;
@@ -501,6 +537,7 @@ while [[ $# -gt 0 ]]; do
         -r | --release-upgrade) release_upgrade=1;;
         -s | --dist-upgrade ) dist_upgrade=1;;
         -g | --setup-efi-grub ) update_grub=1;;
+        -c | --convert-luks ) convert_luks=1;;
         -y | --assumeyes ) assumeyes=1;;
         -u | --usbvm ) usbvm="$2"; shift ;;
         -n | --netvm ) netvm="$2"; shift ;;
@@ -794,6 +831,11 @@ EOF
     if [ "$update_grub" == "1" ]; then
         echo "---> (STAGE 5) Installing EFI Grub..."
         setup_efi_grub
+    fi
+
+    if [ "$convert_luks" == "1" ]; then
+        echo "---> (STAGE 6) Converting LUKS header..."
+        convert_luks
     fi
     echo "INFO: Please ensure to have completed all the stages and reboot before continuing."
 fi
